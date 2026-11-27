@@ -22,3 +22,7 @@ grant select, insert, update, delete on public.invites to authenticated;
 grant all on public.invites, public.profiles, public.app_settings, public.links, public.documents, public.snapshots to service_role;
 grant execute on function public.is_active(), public.is_admin() to authenticated, service_role;
 revoke execute on function public.is_active(), public.is_admin() from public, anon;
+
+-- Allow the auth service to fire the signup triggers
+grant usage on schema private to supabase_auth_admin;
+grant execute on function private.guard_new_user(), private.profile_from_invite() to supabase_auth_admin;
