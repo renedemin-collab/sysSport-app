@@ -153,12 +153,7 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 8px);min-width:18px;he
 .ws .team{grid-column:2;display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .ws .team span{font-size:12px;font-weight:600;border:1px solid var(--line);padding:2px 8px}
 .ws .loc{grid-column:2;font-size:13px;color:var(--muted);overflow-wrap:anywhere}
-.ws .grp,.ws .wsnote,.ws .wsact,.ws .wsform{grid-column:2}
+.ws .deal{grid-column:2;margin-top:4px}
+.ws .dname{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-top:4px}
 .ws .grp{font-size:14px;font-weight:600;color:var(--fg)}
-.ws .wsnote{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid var(--brand);padding:4px 0 4px 10px;margin-top:6px}
-.ws .wsact{margin-top:8px}
-.wsform{grid-column:1 / -1 !important;display:grid;gap:10px;margin-top:10px;padding-top:12px;border-top:1px solid var(--line)}
-input[type=number]{background:var(--surface-2);border:1px solid var(--line);padding:10px 12px;min-height:44px;width:100%;border-radius:0}
-.wsform input,.wsform textarea{background:var(--surface-2)}
-label.chk{display:flex;gap:10px;align-items:center;font-size:14px;min-height:44px}
-label.chk input{width:20px;height:20px;accent-color:var(--brand)}
+.wsnote{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid var(--brand);padding:4px 0 4px 10px;margin-top:6px;color:var(--fg)}

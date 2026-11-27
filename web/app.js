@@ -26,7 +26,7 @@ const ZE = { timetrack: "Timetrack", crewmaster: "Crewmaster" };
 const state = {
   authDraft: null, session: null, me: null, route: "heute", authMode: "login", authBusy: false, authMsg: null,
   snaps: {}, links: [], docs: [], settings: {}, loading: true, err: null,
-  details: {}, wsEdit: null, open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
+  open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
   admin: { profiles: [], invites: [], loaded: false, lastCode: null }, confirmDel: null, busy: {}
 };
 
@@ -122,30 +122,33 @@ function deals() {
   const j = parseMaybe(s.data) || {};
   return (j.results || []).map(r => { const p = r.properties || {};
     return { id: String(r.id), name: String(p.dealname || "Auftrag").trim(), stage: p.dealstage || "", termine: p.termine_workshops || "",
-      cls: p.workshopteilnahmerart || "", tn: p.workshoptnanzahl || "" }; });
+      cls: p.workshopteilnahmerart || "", tn: p.workshoptnanzahl || "", note: plainText(p.description) }; });
+}
+function plainText(html) {
+  if (!html) return "";
+  const d = new DOMParser().parseFromString(String(html).replace(/<br\s*\/?>|<\/p>/gi, "\n"), "text/html");
+  return (d.body.textContent || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 600);
 }
 const snapTime = k => state.snaps[k] ? Date.parse(state.snaps[k].updated_at) : 0;
 
 /* ---------- data loading ---------- */
 async function loadAll() {
   state.loading = true; state.err = null; paint();
-  const [me, snaps, links, docs, settings, details] = await Promise.all([
+  const [me, snaps, links, docs, settings] = await Promise.all([
     sb.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle(),
     sb.from("snapshots").select("kind, data, updated_at"),
     sb.from("links").select("*").order("sort").order("title"),
     sb.from("documents").select("*").order("category").order("title"),
-    sb.from("app_settings").select("*"),
-    sb.from("schul_details").select("*")
+    sb.from("app_settings").select("*")
   ]);
   state.me = me.data || null;
   if (!state.me || !state.me.active) { state.loading = false; paint(); return; }
-  const firstErr = [snaps, links, docs, settings, details].find(r => r.error);
+  const firstErr = [snaps, links, docs, settings].find(r => r.error);
   if (firstErr) state.err = "Daten konnten nicht geladen werden (" + firstErr.error.message + ").";
   state.snaps = Object.fromEntries((snaps.data || []).map(r => [r.kind, r]));
   state.links = links.data || [];
   state.docs = docs.data || [];
   state.settings = Object.fromEntries((settings.data || []).map(r => [r.key, r.value]));
-  state.details = Object.fromEntries((details.data || []).map(r => [r.event_id, r]));
   state.loading = false; paint();
   if (isAdmin() && state.route === "mehr") loadAdmin();
 }
@@ -235,50 +238,67 @@ function eventCard(ev, showDay) {
   }
   return card;
 }
-/* School appointment details: stored per calendar event, or per series (recurring events share the id before "_"). */
-const seriesId = id => (id.includes("_") ? id.split("_")[0] : null);
-function detailFor(w) { return state.details[w.id] || (seriesId(w.id) && state.details[seriesId(w.id)]) || null; }
-function wsCard(w, editable) {
+/* School appointments get class, participant count and note from the matching HubSpot deal.
+   Calendar titles and deal names are free text, so they are matched by school-name tokens. */
+const MATCH_STOP = new Set(["iw","ms","gs","bs","mz","sfz","boxcoaching","boxen","workshop","workshops","projekttag","projekttage","muenchen","schule","uhr","bis","ab","und","klasse","jungs","maedchen","herbst","sommer","winter","fruehling","fasching","hj","kurs","offenen","offener","der","die","das","im","in","am","an","von","fuer","mit"]);
+function mNorm(x) {
+  return " " + String(x || "").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+    .replace(/i\.\s*w\./g, " iw ").replace(/inner\s+warrio\w*/g, " iw ").replace(/[^a-z0-9]+/g, " ") + " ";
+}
+function mTokens(x) {
+  return mNorm(x).split(" ").filter(t => t.length >= 3 && !/^\d/.test(t) && !MATCH_STOP.has(t))
+    .map(t => t.replace(/(strasse|str|schule)$/, "")).filter(t => t.length >= 3);
+}
+function lev1(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+const mSame = (a, b) => a === b || (a.length >= 5 && b.length >= 5 && (a.startsWith(b) || b.startsWith(a))) || (a.length >= 6 && lev1(a, b));
+const mIW = x => /\biw\b/.test(mNorm(x));
+const STAGE_RANK = { "5393823959": 0, "5381690591": 1, "5381716172": 2, "128535245": 3, "128535244": 4 };
+const matchCache = new Map();
+function matchDeals(title) {
+  const ds = deals(); if (!ds) return [];
+  const key = title + "|" + snapTime("deals");
+  if (matchCache.has(key)) return matchCache.get(key);
+  const tt = mTokens(title);
+  let best = [], bestScore = 0, bestRank = 99;
+  if (tt.length) for (const d of ds) {
+    const dt = mTokens(d.name);
+    let score = 0;
+    for (const t of tt) if (dt.some(x => mSame(t, x))) score += t.length;
+    if (!score) continue;
+    if (mIW(title) === mIW(d.name)) score += 2;
+    const rank = STAGE_RANK[d.stage] ?? 9;
+    if (score > bestScore || (score === bestScore && rank < bestRank)) { best = [d]; bestScore = score; bestRank = rank; }
+    else if (score === bestScore && rank === bestRank) best.push(d);
+  }
+  const res = bestScore >= 5 ? best : [];
+  matchCache.set(key, res);
+  return res;
+}
+const klasseText = x => String(x || "").split(";").map(t => t.trim()).filter(Boolean).join(", ");
+function dealFacts(d) {
+  return [d.cls ? klasseText(d.cls) : "", d.tn ? d.tn + (/^\d+$/.test(d.tn.trim()) ? " Teilnehmer" : "") : ""].filter(Boolean).join(" · ");
+}
+function wsCard(w) {
   const time = w.allDay ? "Ganztags" : fTime.format(new Date(w.s));
-  const d = detailFor(w);
-  const facts = d ? [d.klasse ? "Klasse " + d.klasse.replace(/^klasse\s*/i, "") : "", d.anzahl != null ? d.anzahl + " Teilnehmer" : ""].filter(Boolean).join(" · ") : "";
-  const card = h("div", { class: "ws" + (w.e < Date.now() ? " past" : "") },
+  const ms = matchDeals(w.title);
+  return h("div", { class: "ws" + (w.e < Date.now() ? " past" : "") },
     h("div", { class: "time" }, w.allDay ? h("small", { style: "margin:0" }, "Ganztags") : time, h("small", null, keyLabel(dayKey(w.s)))),
     h("div", { class: "ttl" }, w.title),
-    facts ? h("div", { class: "grp" }, facts) : null,
+    ms.map(d => h("div", { class: "deal" },
+      ms.length > 1 ? h("div", { class: "dname" }, d.name.trim()) : null,
+      dealFacts(d) ? h("div", { class: "grp" }, dealFacts(d)) : h("div", { class: "sub" }, "In HubSpot noch keine Klasse/Anzahl eingetragen"),
+      d.note ? h("div", { class: "wsnote" }, d.note) : null)),
     w.loc ? h("div", { class: "loc" }, h("a", { href: "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(w.loc), target: "_blank", rel: "noopener" }, w.loc)) : null,
-    w.team.length ? h("div", { class: "team" }, w.team.map(n => h("span", null, n))) : null,
-    d && d.notiz ? h("div", { class: "wsnote" }, d.notiz) : null,
-    editable && state.wsEdit !== w.id ? h("div", { class: "wsact" }, h("button", { class: "btn small", type: "button", onclick: () => { state.wsEdit = w.id; paint(); } },
-      d ? "Bearbeiten" : "Klasse & Anzahl eintragen")) : null);
-  if (editable && state.wsEdit === w.id) card.append(wsForm(w, d));
-  return card;
-}
-function wsForm(w, d) {
-  const sid = seriesId(w.id);
-  const f = h("form", { class: "wsform" },
-    h("div", { class: "row" },
-      h("label", { class: "f" }, "Klasse", h("input", { type: "text", name: "klasse", maxlength: 60, placeholder: "z. B. 7b", value: (d && d.klasse) || "" })),
-      h("label", { class: "f" }, "Anzahl Teilnehmer", h("input", { type: "number", name: "anzahl", min: 0, max: 999, inputmode: "numeric", value: d && d.anzahl != null ? d.anzahl : "" }))),
-    h("label", { class: "f" }, "Notiz (optional)", h("textarea", { name: "notiz", maxlength: 1000, rows: 3, placeholder: "z. B. Ansprechpartner, Raum, Besonderheiten" }, (d && d.notiz) || "")),
-    sid ? h("label", { class: "chk" }, h("input", { type: "checkbox", name: "serie", checked: !!(d && d.event_id === sid) || !d }), "Für alle Termine dieser Reihe übernehmen") : null,
-    h("div", { class: "actions" },
-      h("button", { class: "btn cta", type: "submit" }, "Speichern"),
-      h("button", { class: "btn", type: "button", onclick: () => { state.wsEdit = null; paint(); } }, "Abbrechen")));
-  f.addEventListener("submit", async e => {
-    e.preventDefault();
-    const klasse = f.klasse.value.trim() || null, notiz = f.notiz.value.trim() || null;
-    const n = f.anzahl.value.trim(), anzahl = n === "" ? null : Math.max(0, Math.min(999, parseInt(n, 10) || 0));
-    const key = sid && f.serie && f.serie.checked ? sid : w.id;
-    const row = { event_id: key, klasse, anzahl, notiz, updated_by: state.me.id, updated_at: new Date().toISOString() };
-    const r = await sb.from("schul_details").upsert(row);
-    if (r.error) { toast("Speichern nicht möglich"); return; }
-    state.details[key] = row;
-    // A series value only shows if no single-date value overrides it.
-    if (key === sid && state.details[w.id]) { await sb.from("schul_details").delete().eq("event_id", w.id); delete state.details[w.id]; }
-    state.wsEdit = null; toast("Gespeichert"); paint();
-  });
-  return f;
+    w.team.length ? h("div", { class: "team" }, w.team.map(n => h("span", null, n))) : null);
 }
 function trialCard(l) {
   const [st, cls] = LEAD[l.status] || [l.status || "–", "muted"];
@@ -367,7 +387,7 @@ function viewSchulen() {
     for (const w of list) {
       const k = dayKey(w.s);
       if (k !== cur) { cur = k; v.push(h("div", { class: "day" }, keyLabel(k))); }
-      v.push(h("div", { style: "margin-bottom:8px" }, wsCard(w, true)));
+      v.push(h("div", { style: "margin-bottom:8px" }, wsCard(w)));
     }
     v.push(h("p", { class: "sub", style: "margin-top:16px" }, "Stand Kalender: " + ago(snapTime("schulen")) + "."));
   } else {
@@ -377,8 +397,9 @@ function viewSchulen() {
     v.push(h("div", { class: "list", style: "margin-top:12px" }, list.map(d => {
       const [st, cls] = DEAL_STAGES[d.stage] || ["–", "muted"];
       return h("div", { class: "lead" }, h("div", { class: "head" }, h("div", { style: "min-width:0" }, h("div", { class: "ttl" }, d.name),
-        h("div", { class: "sub" }, [d.cls, d.tn ? d.tn + " TN" : ""].filter(Boolean).join(" · "))), h("span", { class: "pill " + cls }, st)),
+        h("div", { class: "sub" }, dealFacts(d))), h("span", { class: "pill " + cls }, st)),
         d.termine ? h("div", { class: "sub" }, d.termine) : null,
+        d.note ? h("div", { class: "wsnote" }, d.note) : null,
         isAdmin() ? h("div", { class: "actions" }, h("a", { class: "btn small", href: "https://app.hubspot.com/contacts/" + HUBSPOT_PORTAL + "/record/0-3/" + encodeURIComponent(d.id), target: "_blank", rel: "noopener" }, "In HubSpot öffnen")) : null);
     })));
   }
