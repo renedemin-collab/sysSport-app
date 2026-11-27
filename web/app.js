@@ -24,7 +24,7 @@ const LEAD = {
 const ZE = { timetrack: "Timetrack", crewmaster: "Crewmaster" };
 
 const state = {
-  session: null, me: null, route: "heute", authMode: "login", authBusy: false, authMsg: null,
+  authDraft: null, session: null, me: null, route: "heute", authMode: "login", authBusy: false, authMsg: null,
   snaps: {}, links: [], docs: [], settings: {}, loading: true, err: null,
   open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
   admin: { profiles: [], invites: [], loaded: false, lastCode: null }, confirmDel: null, busy: {}
@@ -160,19 +160,22 @@ function viewAuth() {
   const m = state.authMode;
   const msg = state.authMsg ? h("p", { class: "note " + (state.authMsg.ok ? "ok" : "err") }, state.authMsg.text) : null;
   const form = h("form", { class: "box", novalidate: true },
-    h("label", { class: "f" }, "E-Mail", h("input", { type: "email", id: "aEmail", autocomplete: "username", required: true, inputmode: "email" })),
-    m === "register" ? h("label", { class: "f" }, "Einladungscode (von René)", h("input", { type: "text", id: "aCode", autocomplete: "one-time-code", required: true, maxlength: 12, style: "text-transform:uppercase;letter-spacing:.12em" })) : null,
+    h("label", { class: "f" }, "E-Mail", h("input", { type: "email", id: "aEmail", autocomplete: "username", required: true, inputmode: "email", value: (state.authDraft && state.authDraft.email) || "" })),
+    m === "register" ? h("label", { class: "f" }, "Einladungscode (von René)", h("input", { type: "text", id: "aCode", autocomplete: "one-time-code", autocapitalize: "characters", required: true, maxlength: 12, style: "text-transform:uppercase;letter-spacing:.12em", value: (state.authDraft && state.authDraft.code) || "" })) : null,
     h("label", { class: "f" }, m === "register" ? "Neues Passwort (mind. 10 Zeichen)" : "Passwort",
       h("input", { type: "password", id: "aPass", autocomplete: m === "register" ? "new-password" : "current-password", required: true, minlength: m === "register" ? 10 : null })),
     h("button", { class: "btn cta big", type: "submit", disabled: state.authBusy }, state.authBusy ? "Moment …" : (m === "register" ? "Zugang einrichten" : "Anmelden")));
   form.addEventListener("submit", async e => {
     e.preventDefault();
+    // Read every field before repainting (paint() rebuilds the form).
     const email = $("#aEmail").value.trim().toLowerCase(), pass = $("#aPass").value;
-    if (!email || !pass) { state.authMsg = { text: "Bitte E-Mail und Passwort eingeben." }; paint(); return; }
+    const code = ($("#aCode") ? $("#aCode").value : "").trim().toUpperCase();
+    state.authDraft = { email, code };
+    if (!email || !pass || (m === "register" && !code)) { state.authMsg = { text: m === "register" ? "Bitte E-Mail, Code und Passwort eingeben." : "Bitte E-Mail und Passwort eingeben." }; paint(); return; }
+    if (m === "register" && pass.length < 10) { state.authMsg = { text: "Das Passwort braucht mindestens 10 Zeichen." }; paint(); return; }
     state.authBusy = true; state.authMsg = null; paint();
     try {
       if (m === "register") {
-        const code = ($("#aCode") ? $("#aCode").value : "").trim().toUpperCase();
         const r = await fetch(cfg.supabaseUrl + "/functions/v1/register", { method: "POST",
           headers: { "Content-Type": "application/json", apikey: cfg.supabaseKey }, body: JSON.stringify({ email, code, password: pass }) });
         const j = await r.json().catch(() => ({}));
