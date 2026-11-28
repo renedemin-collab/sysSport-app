@@ -159,3 +159,21 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 8px);min-width:18px;he
 .wsnote{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid var(--brand);padding:4px 0 4px 10px;margin-top:6px;color:var(--fg)}
 .pin{font-family:var(--f-display);font-size:28px;letter-spacing:.12em;font-variant-numeric:tabular-nums;line-height:1.1;margin-top:2px}
 .lead form.row input{min-width:0}
+.iconbtn.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.preview{display:flex;gap:12px;align-items:center;justify-content:space-between;background:var(--brand);color:var(--on-brand);padding:10px 12px;margin-top:12px;font-size:14px;font-weight:600}
+.preview .btn{border-color:rgba(255,255,255,.6);color:#fff;flex:none}
+.person.tog{width:100%;background:none;border:0;text-align:left;color:inherit;min-height:44px;padding:6px 0}
+.person .x{background:none;border:0;color:var(--muted);width:40px;min-height:40px}
+.attbar{display:flex;gap:8px;margin-top:8px}
+.attbar input{flex:1;min-width:0}
+.attinfo{font-size:13px;margin:4px 0 8px;padding:8px 10px;border-left:4px solid var(--brand);background:var(--surface-2)}
+.namelist{font-size:14px;margin-top:4px;overflow-wrap:anywhere}
+.namelist b{font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:var(--muted);margin-right:6px}
+.tile.hadash{width:100%;border:0;text-align:left;min-height:110px;font:inherit}
+.tile.hadash .t{font-size:18px}
+.tile .go{font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.1em}
+.haov{position:fixed;inset:0;z-index:20;background:var(--bg);display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+.habar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}
+.habar b{font-family:var(--f-display);font-weight:400;font-size:18px}
+.haov iframe{flex:1;width:100%;border:0;background:#fff}
+.hahint{font-size:12px;color:var(--muted);margin:0;padding:6px 12px calc(6px + env(safe-area-inset-bottom))}

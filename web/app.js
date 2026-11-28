@@ -26,7 +26,7 @@ const ZE = { timetrack: "Timetrack", crewmaster: "Crewmaster" };
 const state = {
   authDraft: null, session: null, me: null, route: "heute", authMode: "login", authBusy: false, authMsg: null,
   snaps: {}, links: [], docs: [], settings: {}, loading: true, err: null,
-  team: [], infos: [], open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
+  team: [], infos: [], att: {}, drafts: {}, attEdit: {}, attPick: {}, saving: {}, preview: false, haOpen: false, open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
   admin: { profiles: [], invites: [], loaded: false, lastCode: null }, confirmDel: null, busy: {}
 };
 
@@ -61,7 +61,9 @@ function ago(ts) {
 let toastT;
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2800); }
 const safeUrl = u => typeof u === "string" && /^https:\/\//i.test(u.trim()) ? u.trim() : null;
-const isAdmin = () => state.me && state.me.role === "admin" && state.me.active;
+const realAdmin = () => !!(state.me && state.me.role === "admin" && state.me.active);
+// In "Ansicht als Trainer" the admin sees exactly what trainers see (the database still knows the real role).
+const isAdmin = () => realAdmin() && !state.preview;
 const parseMaybe = v => { if (typeof v !== "string") return v; try { return JSON.parse(v); } catch { return null; } };
 function fmtSize(n) { if (!n) return ""; if (n < 1024 * 1024) return Math.round(n / 1024) + " KB"; return (n / 1024 / 1024).toFixed(1).replace(".", ",") + " MB"; }
 function newCode() { const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; return Array.from(crypto.getRandomValues(new Uint8Array(6)), x => a[x % a.length]).join(""); }
@@ -80,7 +82,8 @@ function kurse() {
     for (const g of e.guests || []) if (!g.deleted) people.push({ n: String(g.name || "").replace(/\s+/g, " ").trim(), p: !!g.presence, g: true });
     return { id: String(e.event_id), s: Number(e.datetime_start), e: Number(e.datetime_end), name, trial,
       trainer: trial ? "" : staff, variant: trial ? staff : "", cap: e.capacity || 0, left: Math.max(0, e.spots_left || 0),
-      loc: (e.location && e.location.location_name) || "", people };
+      loc: (e.location && e.location.location_name) || "", people,
+      track: !!e.track_participants_presence, conf: !!e.participants_presence_confirmed };
   }).filter(e => e.s).sort((a, b) => a.s - b.s);
 }
 function trials() {
@@ -134,24 +137,26 @@ const snapTime = k => state.snaps[k] ? Date.parse(state.snaps[k].updated_at) : 0
 /* ---------- data loading ---------- */
 async function loadAll() {
   state.loading = true; state.err = null; paint();
-  const [me, snaps, links, docs, settings, team, infos] = await Promise.all([
+  const [me, snaps, links, docs, settings, team, infos, att] = await Promise.all([
     sb.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle(),
     sb.from("snapshots").select("kind, data, updated_at"),
     sb.from("links").select("*").order("sort").order("title"),
     sb.from("documents").select("*").order("category").order("title"),
     sb.from("app_settings").select("*"),
     sb.from("team_contacts").select("*").order("sort").order("name"),
-    sb.from("info_items").select("*").order("sort").order("label")
+    sb.from("info_items").select("*").order("sort").order("label"),
+    sb.from("attendance").select("*").gte("s", Date.now() - 21 * 864e5).order("s", { ascending: false }).limit(300)
   ]);
   state.me = me.data || null;
   if (!state.me || !state.me.active) { state.loading = false; paint(); return; }
-  const firstErr = [snaps, links, docs, settings, team, infos].find(r => r.error);
+  const firstErr = [snaps, links, docs, settings, team, infos, att].find(r => r.error);
   if (firstErr) state.err = "Daten konnten nicht geladen werden (" + firstErr.error.message + ").";
   state.snaps = Object.fromEntries((snaps.data || []).map(r => [r.kind, r]));
   state.links = links.data || [];
   state.docs = docs.data || [];
   state.settings = Object.fromEntries((settings.data || []).map(r => [r.key, r.value]));
   state.team = team.data || []; state.infos = infos.data || [];
+  state.att = Object.fromEntries((att.data || []).map(r => [r.event_id, r]));
   state.loading = false; paint();
   if (isAdmin() && state.route === "mehr") loadAdmin();
 }
@@ -214,7 +219,9 @@ function noData(kind) {
 function evStatus(ev, now = Date.now()) {
   if (now >= ev.s && now < ev.e) return ["Läuft", "live"];
   if (ev.s > now && ev.s - now < 60 * 60000) return ["In " + Math.max(1, Math.round((ev.s - now) / 60000)) + " Min.", "soon"];
-  if (now >= ev.e) return ["Vorbei", "muted"];
+  const a = state.att[ev.id];
+  if (a && !ev.conf) return [a.done ? "Nachgetragen" : "In App erfasst", "ok"];
+  if (now >= ev.e) return [ev.conf ? "Bestätigt" : "Vorbei", "muted"];
   if (ev.left === 0 && ev.cap) return ["Ausgebucht", "warn"];
   return ["Geplant", "muted"];
 }
@@ -231,15 +238,113 @@ function eventCard(ev, showDay) {
       h("div", { style: "min-width:0" }, h("div", { class: "ttl" }, ev.name), h("div", { class: "sub" }, sub || "–")),
       h("div", { class: "right" }, h("div", { class: "occ" }, String(b), h("span", null, "/" + ev.cap)), h("span", { class: "pill " + cls }, st)),
       h("div", { class: "meter", "aria-hidden": "true" }, h("i", { class: pct >= 100 ? "full" : "", style: "width:" + pct + "%" }))));
-  if (isOpen) {
-    const ppl = h("div", { class: "people" });
-    if (!ev.people.length) ppl.append(h("div", { class: "sub" }, "Noch keine Anmeldungen."));
-    for (const p of ev.people) ppl.append(h("div", { class: "person" },
-      h("span", { class: "mark" + (p.p ? " yes" : ""), "aria-label": p.p ? "anwesend" : "nicht abgehakt" }, p.p ? "✓" : ""),
-      h("span", { class: "nm" }, p.n || "–"), p.g ? h("span", { class: "tag" }, "Probe") : null));
-    card.append(ppl);
-  }
+  if (isOpen) card.append(canMark(ev) || state.att[ev.id] ? attBox(ev) : peopleList(ev));
   return card;
+}
+function peopleList(ev) {
+  const ppl = h("div", { class: "people" });
+  if (!ev.people.length) ppl.append(h("div", { class: "sub" }, "Noch keine Anmeldungen."));
+  for (const p of ev.people) ppl.append(h("div", { class: "person" },
+    h("span", { class: "mark" + (p.p ? " yes" : ""), "aria-label": p.p ? "anwesend" : "nicht abgehakt" }, p.p ? "✓" : ""),
+    h("span", { class: "nm" }, p.n || "–"), p.g ? h("span", { class: "tag" }, "Probe") : null));
+  if (ev.conf) ppl.append(h("div", { class: "sub", style: "margin-top:6px" }, "Anwesenheit in Virtuagym bestätigt."));
+  else if (Date.now() < ev.s - 30 * 60000 && dayKey(ev.s) === todayKey()) ppl.append(h("div", { class: "sub", style: "margin-top:6px" }, "Abhaken ist ab 30 Minuten vor Beginn möglich."));
+  return ppl;
+}
+
+/* ---------- attendance for trainers without Virtuagym ---------- */
+// Today's classes, from 30 min before start, as long as Virtuagym itself is not confirmed.
+const canMark = ev => !ev.conf && dayKey(ev.s) === todayKey() && Date.now() >= ev.s - 30 * 60000;
+function draftFor(ev) {
+  if (!state.drafts[ev.id]) {
+    const a = state.att[ev.id];
+    state.drafts[ev.id] = a
+      ? { marks: ev.people.map(p => { const hit = (a.people || []).find(x => x.n === p.n); return hit ? !!hit.p : !!p.p; }), extra: (a.extra || []).slice() }
+      : { marks: ev.people.map(p => !!p.p), extra: [] };
+  }
+  return state.drafts[ev.id];
+}
+function attSummary(a) {
+  const out = [];
+  const yes = (a.people || []).filter(p => p.p).map(p => p.n), no = (a.people || []).filter(p => !p.p).map(p => p.n);
+  if (yes.length) out.push(h("div", { class: "namelist" }, h("b", null, "Da"), yes.join(", ")));
+  if (no.length) out.push(h("div", { class: "namelist" }, h("b", null, "Nicht da"), no.join(", ")));
+  if ((a.extra || []).length) out.push(h("div", { class: "namelist" }, h("b", null, "Zusätzlich"), a.extra.join(", ")));
+  return out;
+}
+function attBox(ev) {
+  const a = state.att[ev.id];
+  const box = h("div", { class: "people" });
+  if (a && !state.attEdit[ev.id]) {
+    box.append(h("div", { class: "attinfo" }, "In der App bestätigt von " + (a.confirmed_by_name || "einem Trainer") + " um " + fTime.format(new Date(a.confirmed_at)) + " Uhr · " +
+      (a.done ? "in Virtuagym nachgetragen." : "wird in Virtuagym nachgetragen.")));
+    attSummary(a).forEach(n => box.append(n));
+    if (!a.done && canMark(ev)) box.append(h("div", { class: "actions", style: "margin-top:8px" }, h("button", { class: "btn small", type: "button", onclick: () => { state.attEdit[ev.id] = true; delete state.drafts[ev.id]; paint(); } }, "Ändern")));
+    return box;
+  }
+  const d = draftFor(ev);
+  box.append(h("div", { class: "sub", style: "margin-bottom:4px" }, "Antippen, wer da ist. Fehlt jemand, unten eintragen. Danach bestätigen."));
+  if (!ev.people.length) box.append(h("div", { class: "sub" }, "Keine Anmeldungen in Virtuagym."));
+  ev.people.forEach((p, i) => box.append(h("button", { class: "person tog", type: "button", "aria-pressed": d.marks[i] ? "true" : "false",
+    onclick: () => { d.marks[i] = !d.marks[i]; paint(); } },
+    h("span", { class: "mark" + (d.marks[i] ? " yes" : "") }, d.marks[i] ? "✓" : ""), h("span", { class: "nm" }, p.n || "–"), p.g ? h("span", { class: "tag" }, "Probe") : null)));
+  d.extra.forEach((n, i) => box.append(h("div", { class: "person" }, h("span", { class: "mark yes" }, "✓"), h("span", { class: "nm" }, n), h("span", { class: "tag" }, "zusätzlich"),
+    h("button", { class: "x", type: "button", "aria-label": n + " entfernen", onclick: () => { d.extra.splice(i, 1); paint(); } }, "✕"))));
+  const inpId = "pick-" + ev.id;
+  const inp = h("input", { type: "text", id: inpId, value: state.attPick[ev.id] || "", placeholder: "Nicht angemeldet? Name eintragen", maxlength: 60, autocomplete: "off" });
+  inp.addEventListener("input", e => { state.attPick[ev.id] = e.target.value; });
+  const add = () => { const n = (state.attPick[ev.id] || "").trim().replace(/\s+/g, " "); if (!n) return; d.extra.push(n); state.attPick[ev.id] = ""; paintKeepFocus(inpId); };
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  box.append(h("div", { class: "attbar" }, inp, h("button", { class: "btn small", type: "button", onclick: add }, "Hinzufügen")));
+  const n = d.marks.filter(Boolean).length + d.extra.length;
+  box.append(h("div", { class: "actions", style: "margin-top:10px" },
+    h("button", { class: "btn cta", type: "button", disabled: !!state.saving[ev.id], onclick: () => confirmAtt(ev) }, state.saving[ev.id] ? "Speichere …" : "Anwesenheit bestätigen (" + n + ")"),
+    a ? h("button", { class: "btn", type: "button", onclick: () => { delete state.attEdit[ev.id]; delete state.drafts[ev.id]; paint(); } }, "Abbrechen") : null));
+  return box;
+}
+async function confirmAtt(ev) {
+  const d = draftFor(ev);
+  state.saving[ev.id] = true; paint();
+  const row = { event_id: ev.id, name: ev.name, s: ev.s, e: ev.e, trainer: ev.trainer || ev.variant || null,
+    people: ev.people.map((p, i) => ({ n: p.n, g: !!p.g, p: !!d.marks[i] })), extra: d.extra.slice(0, 40),
+    confirmed_by: state.me.id, confirmed_by_name: state.me.name, confirmed_at: new Date().toISOString(), done: false };
+  const r = await sb.from("attendance").upsert(row).select().single();
+  state.saving[ev.id] = false;
+  if (r.error) { toast(/row-level|policy/i.test(r.error.message) ? "Schon in Virtuagym nachgetragen – keine Änderung mehr möglich" : "Speichern nicht möglich"); paint(); return; }
+  state.att[ev.id] = r.data; delete state.attEdit[ev.id]; delete state.drafts[ev.id];
+  toast("Bestätigt"); paint();
+}
+async function markDone(a) {
+  const r = await sb.from("attendance").update({ done: true, done_at: new Date().toISOString() }).eq("event_id", a.event_id).select().single();
+  if (r.error) { toast("Speichern nicht möglich"); return; }
+  state.att[a.event_id] = r.data; toast("Als nachgetragen markiert"); paint();
+}
+function backlogCard(a) {
+  return h("div", { class: "lead" },
+    h("div", { class: "head" }, h("div", { style: "min-width:0" }, h("div", { class: "ttl" }, a.name),
+      h("div", { class: "sub" }, keyLabel(dayKey(a.s)) + ", " + fTime.format(new Date(a.s)) + " Uhr · bestätigt von " + (a.confirmed_by_name || "–"))),
+      h("span", { class: "pill soon" }, "Nachtragen")),
+    ...attSummary(a),
+    h("div", { class: "actions" }, h("button", { class: "btn cta", type: "button", onclick: () => markDone(a) }, "In Virtuagym nachgetragen")));
+}
+
+/* ---------- Home Assistant dashboard (in-app) ---------- */
+function haTile() {
+  const url = safeUrl(state.settings.ha_dashboard_url);
+  if (!url) return null;
+  return h("button", { class: "tile ha hadash", type: "button", onclick: () => { state.haOpen = true; paint(); } },
+    h("div", null, h("div", { class: "t" }, "Home Assistant Dashboard"), h("div", { class: "n" }, "Licht, Geräte und Status im Gym")),
+    h("div", { class: "go" }, "In der App öffnen →"));
+}
+function haOverlay() {
+  const url = safeUrl(state.settings.ha_dashboard_url);
+  return h("div", { class: "haov", role: "dialog", "aria-label": "Home Assistant Dashboard" },
+    h("div", { class: "habar" },
+      h("button", { class: "btn small", type: "button", onclick: () => { state.haOpen = false; paint(); } }, "← Zurück"),
+      h("b", null, "Home Assistant"),
+      h("a", { class: "btn small", href: url, target: "_blank", rel: "noopener" }, "Im Browser öffnen")),
+    h("iframe", { src: url, title: "Home Assistant Dashboard", allow: "fullscreen", referrerpolicy: "no-referrer" }),
+    h("p", { class: "hahint" }, "Bleibt die Fläche leer? Dann lässt Home Assistant die Einbettung nicht zu – „Im Browser öffnen“ funktioniert immer."));
 }
 /* School appointments get class, participant count and note from the matching HubSpot deal.
    Calendar titles and deal names are free text, so they are matched by school-name tokens. */
@@ -336,6 +441,8 @@ function viewHeute() {
   const ha = state.links.filter(l => l.cat === "ha");
   const v = [h("h1", null, "Hallo " + ((state.me && state.me.name) || "") + "!"), h("p", { class: "sub", style: "margin:6px 0 0" }, fDayLong.format(new Date()))];
   v.push(zeitButton());
+  const backlog = Object.values(state.att).filter(a => !a.done).sort((x, y) => x.s - y.s);
+  if (isAdmin() && backlog.length) { v.push(h("div", { class: "kicker" }, "Von Trainern abgehakt – in Virtuagym nachtragen", h("span", { class: "cnt" }, String(backlog.length)))); v.push(h("div", { class: "list" }, backlog.map(backlogCard))); }
   v.push(h("div", { class: "stats" },
     [["#gym", todayK.length, "Kurse im Gym heute"], ["#probe", trialsToday.length, "Probetrainings heute"],
      ["#schulen", wsToday.length, "Schul-Termine heute"], ["#probe", upcomingTrials().filter(l => l.date <= addDaysKey(t, 7)).length, "Probetrainings 7 Tage"]]
@@ -345,7 +452,7 @@ function viewHeute() {
   else { const next = todayK.filter(e => e.e > now); v.push(next.length ? h("div", { class: "list" }, next.map(e => eventCard(e))) : h("p", { class: "empty" }, "Heute keine Kurse mehr.")); }
   if (trialsToday.length) { v.push(h("div", { class: "kicker" }, "Probetrainings heute")); v.push(h("div", { class: "list" }, trialsToday.map(trialCard))); }
   if (wsToday.length) { v.push(h("div", { class: "kicker" }, "An Schulen heute")); v.push(h("div", { class: "list" }, wsToday.map(wsCard))); }
-  if (ha.length) { v.push(h("div", { class: "kicker" }, "Home Assistant")); v.push(h("div", { class: "tiles" }, ha.map(l => tile(l, "ha")))); }
+  if (ha.length || haTile()) { v.push(h("div", { class: "kicker" }, "Home Assistant")); if (haTile()) v.push(haTile()); if (ha.length) v.push(h("div", { class: "tiles", style: "margin-top:8px" }, ha.map(l => tile(l, "ha")))); }
   return v;
 }
 function viewGym() {
@@ -473,7 +580,9 @@ function viewMehr() {
   v.push(h("div", { class: "kicker" }, "Zeiterfassung"));
   v.push(z ? zeitButton() : h("p", { class: "empty" }, "Für dich ist noch keine Zeiterfassung hinterlegt."));
   v.push(h("div", { class: "kicker" }, "Home Assistant"));
-  v.push(ha.length ? h("div", { class: "tiles" }, ha.map(l => tile(l, "ha"))) : h("p", { class: "empty" }, "Noch keine Home-Assistant-Links."));
+  if (haTile()) v.push(haTile());
+  if (ha.length) v.push(h("div", { class: "tiles", style: "margin-top:8px" }, ha.map(l => tile(l, "ha"))));
+  else if (!haTile()) v.push(h("p", { class: "empty" }, "Noch kein Home-Assistant-Dashboard hinterlegt."));
   if (tools.length) { v.push(h("div", { class: "kicker" }, "Apps & Links")); v.push(h("div", { class: "tiles" }, tools.map(l => tile(l)))); }
   if (isAdmin()) v.push(...adminView());
   v.push(h("div", { class: "kicker" }, "Konto"));
@@ -630,18 +739,18 @@ function adminView() {
   v.push(f);
   // Settings: Zeiterfassung URLs
   const sf = h("form", { class: "box" },
-    h("div", { class: "kicker", style: "margin:0" }, "Links Zeiterfassung"),
+    h("div", { class: "kicker", style: "margin:0" }, "Links Zeiterfassung & Home Assistant"),
     h("label", { class: "f" }, "Timetrack-Adresse", h("input", { type: "url", id: "setTT", value: state.settings.timetrack_url || "", placeholder: "https://…" })),
     h("label", { class: "f" }, "Crewmaster-Adresse", h("input", { type: "url", id: "setCM", value: state.settings.crewmaster_url || "", placeholder: "https://…" })),
+    h("label", { class: "f" }, "Home Assistant Dashboard (Adresse)", h("input", { type: "url", id: "setHA", value: state.settings.ha_dashboard_url || "", placeholder: "https://…/dashboard-trainer/0" })),
     h("button", { class: "btn cta", type: "submit" }, "Speichern"));
   sf.addEventListener("submit", async e => {
     e.preventDefault();
-    const tt = sf.querySelector("#setTT").value.trim(), cm = sf.querySelector("#setCM").value.trim();
-    if ((tt && !safeUrl(tt)) || (cm && !safeUrl(cm))) { toast("Adressen müssen mit https:// beginnen"); return; }
-    const r1 = await sb.from("app_settings").update({ value: tt }).eq("key", "timetrack_url");
-    const r2 = await sb.from("app_settings").update({ value: cm }).eq("key", "crewmaster_url");
-    if (r1.error || r2.error) { toast("Speichern nicht möglich"); return; }
-    state.settings.timetrack_url = tt; state.settings.crewmaster_url = cm; toast("Gespeichert"); paint();
+    const vals = { timetrack_url: sf.querySelector("#setTT").value.trim(), crewmaster_url: sf.querySelector("#setCM").value.trim(), ha_dashboard_url: sf.querySelector("#setHA").value.trim() };
+    if (Object.values(vals).some(x => x && !safeUrl(x))) { toast("Adressen müssen mit https:// beginnen"); return; }
+    const rs = await Promise.all(Object.entries(vals).map(([key, value]) => sb.from("app_settings").update({ value }).eq("key", key)));
+    if (rs.some(r => r.error)) { toast("Speichern nicht möglich"); return; }
+    Object.assign(state.settings, vals); toast("Gespeichert"); paint();
   });
   v.push(sf);
   // Links
@@ -678,6 +787,7 @@ const ICONS = {
   probe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-7 7-7s7 3 7 7M19 8v6M16 11h6"/></svg>',
   mehr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>'
 };
+ICONS.eye = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 ICONS.refresh = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
 const TABS = [["heute", "Heute"], ["gym", "Gym"], ["schulen", "Schulen"], ["probe", "Probe"], ["mehr", "Infos"]];
 function icon(k) { const s = document.createElement("span"); s.innerHTML = ICONS[k]; return s.firstChild; }
@@ -697,15 +807,21 @@ function paint() {
   if (state.snaps.probe) parts.push("HubSpot " + ago(snapTime("probe")));
   const header = h("header", { class: "top" }, h("div", { class: "wrap" },
     h("div", { class: "brand" }, h("b", null, "sysSport ", h("span", null, "Trainer")), h("span", { class: "stand" }, state.loading ? "Lade …" : (parts.length ? "Stand: " + parts.join(" · ") : "Noch kein Abgleich"))),
+    realAdmin() ? h("button", { class: "iconbtn" + (state.preview ? " on" : ""), type: "button", "aria-pressed": state.preview ? "true" : "false",
+      "aria-label": state.preview ? "Zurück zur Admin-Ansicht" : "Ansicht als Trainer", title: state.preview ? "Zurück zur Admin-Ansicht" : "Ansicht als Trainer",
+      onclick: () => { state.preview = !state.preview; paint(); toast(state.preview ? "Ansicht als Trainer" : "Admin-Ansicht"); } }, icon("eye")) : null,
     h("button", { class: "iconbtn" + (state.loading ? " spin" : ""), type: "button", "aria-label": "Neu laden", onclick: loadAll },
       icon("refresh"))));
   const r = state.route;
   const nodes = r === "gym" ? viewGym() : r === "schulen" ? viewSchulen() : r === "probe" ? viewProbe() : r === "mehr" ? viewMehr() : viewHeute();
-  const main = h("main", { class: "wrap" }, state.err ? h("p", { class: "note err" }, state.err) : null, nodes);
+  const banner = state.preview ? h("div", { class: "preview" }, h("span", null, "Ansicht als Trainer – so sieht dein Team die App."),
+    h("button", { class: "btn small", type: "button", onclick: () => { state.preview = false; paint(); } }, "Beenden")) : null;
+  const main = h("main", { class: "wrap" }, banner, state.err ? h("p", { class: "note err" }, state.err) : null, nodes);
   const n = upcomingTrials().filter(l => l.date <= addDaysKey(todayKey(), 1)).length;
   const nav = h("nav", { class: "tabs", "aria-label": "Bereiche" }, h("div", { class: "wrap" }, TABS.map(([k, l]) =>
     h("a", { href: "#" + k, "aria-current": r === k ? "page" : null }, icon(k), l, k === "probe" && n ? h("span", { class: "badge" }, String(n)) : null))));
-  app.replaceChildren(header, main, nav);
+  app.replaceChildren(header, main, nav, ...(state.haOpen && safeUrl(state.settings.ha_dashboard_url) ? [haOverlay()] : []));
+  document.body.style.overflow = state.haOpen ? "hidden" : "";
 }
 function paintKeepFocus(id) {
   const el = document.getElementById(id); const pos = el ? el.selectionStart : null;
