@@ -157,3 +157,5 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 8px);min-width:18px;he
 .ws .dname{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-top:4px}
 .ws .grp{font-size:14px;font-weight:600;color:var(--fg)}
 .wsnote{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid var(--brand);padding:4px 0 4px 10px;margin-top:6px;color:var(--fg)}
+.pin{font-family:var(--f-display);font-size:28px;letter-spacing:.12em;font-variant-numeric:tabular-nums;line-height:1.1;margin-top:2px}
+.lead form.row input{min-width:0}

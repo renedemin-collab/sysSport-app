@@ -1,5 +1,5 @@
 // App shell cache. Data (Supabase) is never cached here.
-const CACHE = "syssport-v7";
+const CACHE = "syssport-v8";
 const SHELL = ["./", "index.html", "vendor/supabase.js",
   "fonts/patua-one-latin-400-normal.woff2", "fonts/outfit-latin-300-normal.woff2", "fonts/outfit-latin-400-normal.woff2",
   "fonts/outfit-latin-600-normal.woff2", "fonts/outfit-latin-800-normal.woff2", "icons/icon-192.png"];

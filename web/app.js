@@ -26,7 +26,7 @@ const ZE = { timetrack: "Timetrack", crewmaster: "Crewmaster" };
 const state = {
   authDraft: null, session: null, me: null, route: "heute", authMode: "login", authBusy: false, authMsg: null,
   snaps: {}, links: [], docs: [], settings: {}, loading: true, err: null,
-  open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
+  team: [], infos: [], open: new Set(), dayFilter: "alle", trainer: "alle", probeTab: "an", wsTab: "termine", docQ: "", docCat: "Alle",
   admin: { profiles: [], invites: [], loaded: false, lastCode: null }, confirmDel: null, busy: {}
 };
 
@@ -134,21 +134,24 @@ const snapTime = k => state.snaps[k] ? Date.parse(state.snaps[k].updated_at) : 0
 /* ---------- data loading ---------- */
 async function loadAll() {
   state.loading = true; state.err = null; paint();
-  const [me, snaps, links, docs, settings] = await Promise.all([
+  const [me, snaps, links, docs, settings, team, infos] = await Promise.all([
     sb.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle(),
     sb.from("snapshots").select("kind, data, updated_at"),
     sb.from("links").select("*").order("sort").order("title"),
     sb.from("documents").select("*").order("category").order("title"),
-    sb.from("app_settings").select("*")
+    sb.from("app_settings").select("*"),
+    sb.from("team_contacts").select("*").order("sort").order("name"),
+    sb.from("info_items").select("*").order("sort").order("label")
   ]);
   state.me = me.data || null;
   if (!state.me || !state.me.active) { state.loading = false; paint(); return; }
-  const firstErr = [snaps, links, docs, settings].find(r => r.error);
+  const firstErr = [snaps, links, docs, settings, team, infos].find(r => r.error);
   if (firstErr) state.err = "Daten konnten nicht geladen werden (" + firstErr.error.message + ").";
   state.snaps = Object.fromEntries((snaps.data || []).map(r => [r.kind, r]));
   state.links = links.data || [];
   state.docs = docs.data || [];
   state.settings = Object.fromEntries((settings.data || []).map(r => [r.key, r.value]));
+  state.team = team.data || []; state.infos = infos.data || [];
   state.loading = false; paint();
   if (isAdmin() && state.route === "mehr") loadAdmin();
 }
@@ -425,8 +428,25 @@ async function openDoc(d) {
   if (w) w.location = data.signedUrl; else location.href = data.signedUrl;
 }
 function docKind(d) { const x = (d.file_name.split(".").pop() || "").toUpperCase(); return x.length <= 4 ? x : "DATEI"; }
+const telHref = p => "tel:" + String(p || "").replace(/[^\d+]/g, "");
+const waHref = p => { let d = String(p || "").replace(/[^\d+]/g, ""); if (d.startsWith("+")) d = d.slice(1); else if (d.startsWith("00")) d = d.slice(2); else if (d.startsWith("0")) d = "49" + d.slice(1); return "https://wa.me/" + d; };
 function viewMehr() {
-  const v = [h("h1", null, "Bücherei & Tools")];
+  const v = [h("h1", null, "Infos")];
+  // Team
+  v.push(h("div", { class: "kicker" }, "Team"));
+  v.push(state.team.length ? h("div", { class: "list" }, state.team.map(t => h("div", { class: "lead" },
+    h("div", { class: "head" }, h("div", { style: "min-width:0" }, h("div", { class: "ttl" }, t.name), t.role ? h("div", { class: "sub" }, t.role) : null),
+      t.phone ? h("a", { class: "sub mono", href: telHref(t.phone) }, t.phone) : h("span", { class: "sub" }, "keine Nummer")),
+    t.phone ? h("div", { class: "actions" }, h("a", { class: "btn small", href: telHref(t.phone) }, "Anrufen"), h("a", { class: "btn small", href: waHref(t.phone), target: "_blank", rel: "noopener" }, "WhatsApp")) : null,
+    isAdmin() ? teamEdit(t) : null))) : h("p", { class: "empty" }, "Noch keine Kontakte."));
+  if (isAdmin()) v.push(teamAdd());
+  // Info items (e.g. tablet PINs)
+  v.push(h("div", { class: "kicker" }, "Wichtige Infos"));
+  v.push(state.infos.length ? h("div", { class: "list" }, state.infos.map(i => h("div", { class: "docrow" },
+    h("div", { class: "doc" }, h("div", { class: "body" }, h("div", { class: "n" }, i.label), h("div", { class: "pin" }, i.value))),
+    isAdmin() ? h("button", { class: "del", type: "button", "aria-label": i.label + " löschen", onclick: async () => {
+      const r = await sb.from("info_items").delete().eq("id", i.id); if (r.error) toast("Löschen nicht möglich"); else { state.infos = state.infos.filter(x => x.id !== i.id); paint(); } } }, "✕") : null))) : h("p", { class: "empty" }, "Noch keine Infos."));
+  if (isAdmin()) v.push(infoAdd());
   // Library
   const cats = ["Alle", ...[...new Set(state.docs.map(d => d.category))].sort()];
   const q = state.docQ.trim().toLowerCase();
@@ -460,6 +480,51 @@ function viewMehr() {
   v.push(h("p", { class: "sub" }, "Angemeldet als " + (state.me ? state.me.email : "")));
   v.push(h("button", { class: "btn", type: "button", style: "margin-top:8px", onclick: async () => { await sb.auth.signOut(); } }, "Abmelden"));
   return v;
+}
+function teamEdit(t) {
+  const f = h("form", { class: "row", style: "margin-top:4px" },
+    h("input", { type: "text", name: "phone", value: t.phone || "", placeholder: "Telefonnummer", inputmode: "tel", maxlength: 40, "aria-label": "Telefonnummer " + t.name }),
+    h("div", { class: "actions", style: "flex:none;min-width:0" },
+      h("button", { class: "btn small", type: "submit" }, "Speichern"),
+      h("button", { class: "btn small danger", type: "button", onclick: async () => {
+        if (!confirm(t.name + " aus dem Team-Block entfernen?")) return;
+        const r = await sb.from("team_contacts").delete().eq("id", t.id); if (r.error) toast("Löschen nicht möglich"); else { state.team = state.team.filter(x => x.id !== t.id); paint(); } } }, "Entfernen")));
+  f.addEventListener("submit", async e => {
+    e.preventDefault();
+    const phone = f.elements["phone"].value.trim() || null;
+    const r = await sb.from("team_contacts").update({ phone }).eq("id", t.id);
+    if (r.error) toast("Speichern nicht möglich"); else { t.phone = phone; toast("Gespeichert"); paint(); }
+  });
+  return f;
+}
+function teamAdd() {
+  const f = h("form", { class: "box" }, h("div", { class: "kicker", style: "margin:0" }, "Kontakt hinzufügen"),
+    h("div", { class: "row" }, h("input", { type: "text", name: "name", placeholder: "Name", required: true, maxlength: 60 }),
+      h("input", { type: "text", name: "phone", placeholder: "Telefonnummer", inputmode: "tel", maxlength: 40 })),
+    h("input", { type: "text", name: "role", placeholder: "Funktion (optional), z. B. Gym-Leitung", maxlength: 60 }),
+    h("button", { class: "btn cta", type: "submit" }, "Hinzufügen"));
+  f.addEventListener("submit", async e => {
+    e.preventDefault();
+    const name = f.elements["name"].value.trim(); if (!name) return;
+    const r = await sb.from("team_contacts").insert({ name, phone: f.elements["phone"].value.trim() || null, role: f.elements["role"].value.trim() || null, sort: 50 + state.team.length }).select().single();
+    if (r.error) { toast("Speichern nicht möglich"); return; }
+    state.team.push(r.data); toast("Hinzugefügt"); paint();
+  });
+  return f;
+}
+function infoAdd() {
+  const f = h("form", { class: "box" }, h("div", { class: "kicker", style: "margin:0" }, "Info hinzufügen"),
+    h("div", { class: "row" }, h("input", { type: "text", name: "label", placeholder: "Bezeichnung, z. B. WLAN-Passwort", required: true, maxlength: 80 }),
+      h("input", { type: "text", name: "value", placeholder: "Wert", required: true, maxlength: 200 })),
+    h("button", { class: "btn cta", type: "submit" }, "Hinzufügen"));
+  f.addEventListener("submit", async e => {
+    e.preventDefault();
+    const label = f.elements["label"].value.trim(), value = f.elements["value"].value.trim(); if (!label || !value) return;
+    const r = await sb.from("info_items").insert({ label, value, sort: 50 + state.infos.length }).select().single();
+    if (r.error) { toast("Speichern nicht möglich"); return; }
+    state.infos.push(r.data); toast("Hinzugefügt"); paint();
+  });
+  return f;
 }
 function uploadForm() {
   const cats = [...new Set(state.docs.map(d => d.category))].sort();
@@ -614,7 +679,7 @@ const ICONS = {
   mehr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>'
 };
 ICONS.refresh = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
-const TABS = [["heute", "Heute"], ["gym", "Gym"], ["schulen", "Schulen"], ["probe", "Probe"], ["mehr", "Bücherei"]];
+const TABS = [["heute", "Heute"], ["gym", "Gym"], ["schulen", "Schulen"], ["probe", "Probe"], ["mehr", "Infos"]];
 function icon(k) { const s = document.createElement("span"); s.innerHTML = ICONS[k]; return s.firstChild; }
 
 function paint() {
