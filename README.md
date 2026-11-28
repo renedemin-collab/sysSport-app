@@ -11,7 +11,8 @@ Interne App (PWA) für das Trainer-Team von sysSport. Läuft auf iPhone und Andr
 | `supabase/migrations/` | | Datenbank-Schema |
 | `supabase/functions/register` | Edge Function | Erstes Anmelden mit Einladungscode |
 | `supabase/functions/admin` | Edge Function | Trainer sperren / entsperren / Zugang zurücksetzen |
-| Make-Szenario „Trainer-App – Daten abgleichen“ | Make | Holt alle 30 Min. (6–22 Uhr) Kursplan (Virtuagym), Probeschüler und Schul-Aufträge (HubSpot) und schreibt sie per `rpc/ingest` in Supabase |
+| Make-Szenario „Trainer-App – Daten abgleichen“ | Make | Alle 30 Min. (6–22 Uhr): Kursplan (Virtuagym), Probeschüler (HubSpot), Schul-Termine (Google Kalender) → `rpc/ingest` |
+| Make-Szenario „Trainer-App – Schul-Aufträge & Ansprechpartner“ | Make | Stündlich (6–22 Uhr): Schul-Aufträge inkl. Klasse, Anzahl, Workshop-Notiz und verknüpfte Ansprechpartner (HubSpot) |
 
 ## Zugang
 

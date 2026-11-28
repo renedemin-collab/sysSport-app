@@ -96,8 +96,13 @@ function trials() {
       interest: p.interesse_sport || "", phone: p.mobilephone || p.phone || "" };
   }).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 }
+const TEAM_EMAILS = { "info@strongerbyyourself.de": "Pia", "rene.demin": "René", "demin.rene": "René", "emir.demir": "Emir", "felix.jung": "Felix",
+  "leonie.hann": "Leonie", "andreas.ciobanu29": "Andreas", "tobias.schopf": "Tobias", "numanskenderi": "Numan", "valentin.heinzel": "Valentin" };
 function teamName(email) {
-  const local = String(email || "").toLowerCase().split("@")[0];
+  const e = String(email || "").toLowerCase();
+  if (TEAM_EMAILS[e]) return TEAM_EMAILS[e];
+  const local = e.split("@")[0];
+  if (TEAM_EMAILS[local]) return TEAM_EMAILS[local];
   const first = local.split(/[._\d-]/)[0];
   return first ? first.charAt(0).toUpperCase() + first.slice(1) : "";
 }
@@ -116,16 +121,38 @@ function schulTermine() {
     const allDay = !st.dateTime;
     const s0 = allDay ? Date.parse((st.date || "") + "T00:00:00") : Date.parse(st.dateTime);
     const e0 = allDay ? Date.parse((en.date || "") + "T00:00:00") : Date.parse(en.dateTime);
-    const team = [...new Set((ev.attendees || []).filter(a => !/resource\.calendar/.test(a.email || "")).map(a => a.displayName || teamName(a.email)).filter(Boolean))];
+    const team = [...new Set((ev.attendees || []).filter(a => !/resource\.calendar/.test(a.email || "")).map(a => teamName(a.email) || a.displayName).filter(Boolean))];
     return { id: String(ev.id), s: s0, e: e0, allDay, title: String(ev.summary || "Termin").trim(), loc: String(ev.location || "").trim(), team };
   }).filter(e => !isNaN(e.s)).sort((a, b) => a.s - b.s);
 }
+let dealsCache = { key: "", list: null };
 function deals() {
   const s = state.snaps.deals; if (!s) return null;
+  const key = snapTime("deals") + "|" + snapTime("contacts");
+  if (dealsCache.key === key) return dealsCache.list;
   const j = parseMaybe(s.data) || {};
-  return (j.results || []).map(r => { const p = r.properties || {};
+  const people = dealContacts();
+  const list = (j.results || []).map(r => { const p = r.properties || {};
+    const notes = [plainText(p.workshop_notzi), plainText(p.description)].filter(Boolean);
     return { id: String(r.id), name: String(p.dealname || "Auftrag").trim(), stage: p.dealstage || "", termine: p.termine_workshops || "",
-      cls: p.workshopteilnahmerart || "", tn: p.workshoptnanzahl || "", note: plainText(p.description) }; });
+      cls: p.workshopteilnahmerart || "", tn: p.workshoptnanzahl || "", note: [...new Set(notes)].join("\n\n"), contacts: people[String(r.id)] || [] }; });
+  dealsCache = { key, list };
+  return list;
+}
+/* School contact persons: deal -> associated HubSpot contacts (snapshot "contacts", written by Make). */
+function dealContacts() {
+  const s = state.snaps.contacts; if (!s) return {};
+  const j = parseMaybe(s.data) || {};
+  const byId = {};
+  for (const c of j.contacts || []) { const p = c.properties || {};
+    byId[String(c.id)] = { name: [p.firstname, p.lastname].filter(Boolean).join(" ").trim(), role: p.jobtitle || "", phone: p.mobilephone || p.phone || "", email: p.email || "" }; }
+  const out = {};
+  (j.dealIds || []).forEach((id, i) => {
+    const a = (j.assoc || [])[i];
+    const ids = ((a && a.contacts && a.contacts.results) || []).map(x => String(x.id));
+    out[String(id)] = [...new Set(ids)].map(x => byId[x]).filter(c => c && (c.name || c.phone || c.email));
+  });
+  return out;
 }
 function plainText(html) {
   if (!html) return "";
@@ -373,7 +400,7 @@ const STAGE_RANK = { "5393823959": 0, "5381690591": 1, "5381716172": 2, "1285352
 const matchCache = new Map();
 function matchDeals(title) {
   const ds = deals(); if (!ds) return [];
-  const key = title + "|" + snapTime("deals");
+  const key = title + "|" + snapTime("deals") + "|" + snapTime("contacts");
   if (matchCache.has(key)) return matchCache.get(key);
   const tt = mTokens(title);
   let best = [], bestScore = 0, bestRank = 99;
@@ -392,6 +419,21 @@ function matchDeals(title) {
   return res;
 }
 const klasseText = x => String(x || "").split(";").map(t => t.trim()).filter(Boolean).join(", ");
+function contactLine(c) {
+  return h("div", { class: "cp" },
+    h("div", null, h("b", null, c.name || "Ansprechpartner"), c.role ? h("span", { class: "sub" }, " · " + c.role) : null),
+    h("div", { class: "actions" },
+      c.phone ? h("a", { class: "btn small", href: telHref(c.phone) }, "Anrufen") : null,
+      c.phone ? h("a", { class: "btn small", href: waHref(c.phone), target: "_blank", rel: "noopener" }, "WhatsApp") : null,
+      c.email ? h("a", { class: "btn small", href: "mailto:" + c.email }, "E-Mail") : null));
+}
+function dealDetails(d, showName) {
+  return h("div", { class: "deal" },
+    showName ? h("div", { class: "dname" }, d.name.trim()) : null,
+    dealFacts(d) ? h("div", { class: "grp" }, dealFacts(d)) : h("div", { class: "sub" }, "In HubSpot noch keine Klasse/Anzahl eingetragen"),
+    d.contacts.length ? h("div", { class: "cps" }, h("div", { class: "lbl" }, d.contacts.length > 1 ? "Ansprechpartner" : "Ansprechpartner"), d.contacts.map(contactLine)) : null,
+    d.note ? h("div", { class: "wsnote" }, d.note) : null);
+}
 function dealFacts(d) {
   return [d.cls ? klasseText(d.cls) : "", d.tn ? d.tn + (/^\d+$/.test(d.tn.trim()) ? " Teilnehmer" : "") : ""].filter(Boolean).join(" · ");
 }
@@ -401,10 +443,7 @@ function wsCard(w) {
   return h("div", { class: "ws" + (w.e < Date.now() ? " past" : "") },
     h("div", { class: "time" }, w.allDay ? h("small", { style: "margin:0" }, "Ganztags") : time, h("small", null, keyLabel(dayKey(w.s)))),
     h("div", { class: "ttl" }, w.title),
-    ms.map(d => h("div", { class: "deal" },
-      ms.length > 1 ? h("div", { class: "dname" }, d.name.trim()) : null,
-      dealFacts(d) ? h("div", { class: "grp" }, dealFacts(d)) : h("div", { class: "sub" }, "In HubSpot noch keine Klasse/Anzahl eingetragen"),
-      d.note ? h("div", { class: "wsnote" }, d.note) : null)),
+    ms.map(d => dealDetails(d, ms.length > 1)),
     w.loc ? h("div", { class: "loc" }, h("a", { href: "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(w.loc), target: "_blank", rel: "noopener" }, w.loc)) : null,
     w.team.length ? h("div", { class: "team" }, w.team.map(n => h("span", null, n))) : null);
 }
@@ -485,34 +524,34 @@ function viewGym() {
 function viewSchulen() {
   const ws = schulTermine(), ds = deals();
   const v = [h("h1", null, "Kurse an Schulen")];
-  v.push(h("div", { class: "chips", role: "group" },
-    [["termine", "Termine"], ["auftraege", "Aufträge"]].map(([k, l]) => h("button", { class: "chip", type: "button", "aria-pressed": state.wsTab === k ? "true" : "false",
-      onclick: () => { state.wsTab = k; paint(); } }, l))));
-  if (state.wsTab === "termine") {
-    if (!ws) return v.concat(noData("Google Kalender"));
-    const now = Date.now();
-    const list = ws.filter(w => w.e > now - 12 * 3600e3);
-    if (!list.length) v.push(h("p", { class: "empty", style: "margin-top:12px" }, "Keine Schul-Termine in den nächsten Wochen."));
-    let cur = null;
-    for (const w of list) {
-      const k = dayKey(w.s);
-      if (k !== cur) { cur = k; v.push(h("div", { class: "day" }, keyLabel(k))); }
-      v.push(h("div", { style: "margin-bottom:8px" }, wsCard(w)));
-    }
-    v.push(h("p", { class: "sub", style: "margin-top:16px" }, "Stand Kalender: " + ago(snapTime("schulen")) + "."));
-  } else {
-    if (!ds) return v.concat(noData("HubSpot"));
-    const order = Object.keys(DEAL_STAGES);
-    const list = ds.slice().sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage));
-    v.push(h("div", { class: "list", style: "margin-top:12px" }, list.map(d => {
-      const [st, cls] = DEAL_STAGES[d.stage] || ["–", "muted"];
-      return h("div", { class: "lead" }, h("div", { class: "head" }, h("div", { style: "min-width:0" }, h("div", { class: "ttl" }, d.name),
-        h("div", { class: "sub" }, dealFacts(d))), h("span", { class: "pill " + cls }, st)),
-        d.termine ? h("div", { class: "sub" }, d.termine) : null,
-        d.note ? h("div", { class: "wsnote" }, d.note) : null,
-        isAdmin() ? h("div", { class: "actions" }, h("a", { class: "btn small", href: "https://app.hubspot.com/contacts/" + HUBSPOT_PORTAL + "/record/0-3/" + encodeURIComponent(d.id), target: "_blank", rel: "noopener" }, "In HubSpot öffnen")) : null);
-    })));
+  if (!ws && !ds) return v.concat(noData("Kalender/HubSpot"));
+  const now = Date.now();
+  const list = (ws || []).filter(w => w.e > now - 12 * 3600e3);
+  // Termine (calendar) with HubSpot details
+  v.push(h("div", { class: "kicker" }, "Termine", h("span", { class: "cnt" }, String(list.length))));
+  if (!list.length) v.push(h("p", { class: "empty" }, ws ? "Keine Schul-Termine in den nächsten Wochen." : "Kalender noch nicht abgeglichen."));
+  let cur = null;
+  for (const w of list) {
+    const k = dayKey(w.s);
+    if (k !== cur) { cur = k; v.push(h("div", { class: "day" }, keyLabel(k))); }
+    v.push(h("div", { style: "margin-bottom:8px" }, wsCard(w)));
   }
+  // Deals without an upcoming appointment: open requests, offers, confirmed but not yet in the calendar
+  if (ds) {
+    const used = new Set(list.flatMap(w => matchDeals(w.title).map(d => d.id)));
+    const order = Object.keys(DEAL_STAGES);
+    const rest = ds.filter(d => !used.has(d.id)).sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage));
+    v.push(h("div", { class: "kicker" }, "Anfragen & Aufträge ohne Termin", h("span", { class: "cnt" }, String(rest.length))));
+    v.push(rest.length ? h("div", { class: "list" }, rest.map(d => {
+      const [st, cls] = DEAL_STAGES[d.stage] || ["–", "muted"];
+      return h("div", { class: "lead" },
+        h("div", { class: "head" }, h("div", { class: "ttl", style: "min-width:0" }, d.name), h("span", { class: "pill " + cls }, st)),
+        d.termine ? h("div", { class: "sub" }, "Termine laut HubSpot: " + d.termine) : null,
+        dealDetails(d, false),
+        isAdmin() ? h("div", { class: "actions" }, h("a", { class: "btn small", href: "https://app.hubspot.com/contacts/" + HUBSPOT_PORTAL + "/record/0-3/" + encodeURIComponent(d.id), target: "_blank", rel: "noopener" }, "In HubSpot öffnen")) : null);
+    })) : h("p", { class: "empty" }, "Alle Aufträge haben einen Termin im Kalender."));
+  }
+  v.push(h("p", { class: "sub", style: "margin-top:16px" }, "Stand Kalender: " + ago(snapTime("schulen")) + " · HubSpot: " + ago(snapTime("deals")) + "."));
   return v;
 }
 function viewProbe() {
